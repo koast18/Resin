@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*' # Trigger on tags starting with v, e.g., v1.0.0, v1.0.0-rc.1
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version tag, e.g. v1.2.1 (default: latest)'
+        required: false
+        default: 'latest'
 
 concurrency:
   group: release-${{ github.ref }}
@@ -212,6 +218,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ steps.check_prerelease.outputs.is_prerelease == 'false' }}
+            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
