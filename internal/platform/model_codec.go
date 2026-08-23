@@ -2,6 +2,7 @@ package platform
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strings"
 
@@ -60,11 +61,54 @@ func CompileRegexFilters(regexFilters []string) (node.TagFilter, error) {
 	return compiled, nil
 }
 
+// CompileEgressIPFilters compiles egress IP filter rules and returns a runtime
+// filter set. Each entry is either a single IP ("1.2.3.4", "2001:db8::1") or
+// a CIDR prefix ("45.90.0.0/16"); a leading "!" marks an exclude rule.
+// Blank lines are skipped; malformed entries return an error.
+func CompileEgressIPFilters(filters []string) (EgressIPFilters, error) {
+	var out EgressIPFilters
+	for i, raw := range filters {
+		rule := strings.TrimSpace(raw)
+		if rule == "" {
+			continue
+		}
+		exclude := false
+		if strings.HasPrefix(rule, "!") {
+			exclude = true
+			rule = strings.TrimSpace(rule[1:])
+		}
+
+		var prefix netip.Prefix
+		if strings.Contains(rule, "/") {
+			p, err := netip.ParsePrefix(rule)
+			if err != nil {
+				return EgressIPFilters{}, fmt.Errorf("egress_ip_filters[%d]: invalid CIDR %q: %v", i, raw, err)
+			}
+			prefix = p
+		} else {
+			addr, err := netip.ParseAddr(rule)
+			if err != nil {
+				return EgressIPFilters{}, fmt.Errorf("egress_ip_filters[%d]: invalid IP or CIDR %q: %v", i, raw, err)
+			}
+			// Normalize a bare IP into a single-address prefix.
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+
+		if exclude {
+			out.Excludes = append(out.Excludes, prefix.Masked())
+		} else {
+			out.Includes = append(out.Includes, prefix.Masked())
+		}
+	}
+	return out, nil
+}
+
 // NewConfiguredPlatform builds a runtime platform with non-filter settings applied.
 func NewConfiguredPlatform(
 	id, name string,
 	regexFilters node.TagFilter,
 	regionFilters []string,
+	egressIPFilters EgressIPFilters,
 	stickyTTLNs int64,
 	missAction string,
 	emptyAccountBehavior string,
@@ -77,7 +121,7 @@ func NewConfiguredPlatform(
 		normalizedFixedHeaders = strings.TrimSpace(fixedAccountHeader)
 		fixedHeaders = nil
 	}
-	plat := NewPlatformWithTagFilter(id, name, regexFilters, regionFilters)
+	plat := NewPlatformWithTagFilter(id, name, regexFilters, regionFilters, egressIPFilters)
 	plat.StickyTTLNs = stickyTTLNs
 	plat.ReverseProxyMissAction = missAction
 	plat.ReverseProxyEmptyAccountBehavior = emptyAccountBehavior
@@ -105,6 +149,10 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 	}
 	if err := ValidateRegionFilters(mp.RegionFilters); err != nil {
 		return nil, err
+	}
+	egressIPFilters, err := CompileEgressIPFilters(mp.EgressIPFilters)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s egress_ip_filters: %w", mp.ID, err)
 	}
 	emptyAccountBehavior := mp.ReverseProxyEmptyAccountBehavior
 	if !ReverseProxyEmptyAccountBehavior(emptyAccountBehavior).IsValid() {
@@ -135,6 +183,7 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		mp.Name,
 		regexFilters,
 		append([]string(nil), mp.RegionFilters...),
+		egressIPFilters,
 		mp.StickyTTLNs,
 		string(missAction),
 		emptyAccountBehavior,

@@ -201,3 +201,61 @@ func TestPreviewFilter_RegionNegation_UnknownRegionExcluded(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviewFilter_EgressIPInclude(t *testing.T) {
+	fixture := buildPreviewFilterFixture(t)
+
+	nodes, err := fixture.cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters:    []string{".*"},
+			EgressIPFilters: []string{"2.2.2.0/24", "3.3.3.3"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("nodes len = %d, want 2 (us + unknown)", len(nodes))
+	}
+	for _, n := range nodes {
+		if n.NodeHash == fixture.hkHash {
+			t.Fatalf("hk node (1.1.1.1) should have been excluded by egress IP filter")
+		}
+	}
+}
+
+func TestPreviewFilter_EgressIPExcludeOnly(t *testing.T) {
+	fixture := buildPreviewFilterFixture(t)
+
+	nodes, err := fixture.cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters:    []string{".*"},
+			EgressIPFilters: []string{"!1.1.1.0/24"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("nodes len = %d, want 2 (us + unknown)", len(nodes))
+	}
+	for _, n := range nodes {
+		if n.NodeHash == fixture.hkHash {
+			t.Fatalf("hk node should have been excluded")
+		}
+	}
+}
+
+func TestPreviewFilter_EgressIPInvalid(t *testing.T) {
+	fixture := buildPreviewFilterFixture(t)
+
+	_, err := fixture.cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters:    []string{".*"},
+			EgressIPFilters: []string{"not-an-ip"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid egress_ip_filters")
+	}
+}

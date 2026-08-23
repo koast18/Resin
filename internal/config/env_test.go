@@ -602,3 +602,29 @@ func assertContains(t *testing.T, s, substr string) {
 		t.Errorf("expected %q to contain %q", s, substr)
 	}
 }
+
+func TestLoadEnvConfig_DefaultPlatformEgressIPFilters(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_DEFAULT_PLATFORM_EGRESS_IP_FILTERS"] = `["45.90.0.0/16","1.2.3.4","!203.0.113.0/24"]`
+	setEnvs(t, envs)
+
+	cfg, err := LoadEnvConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertEqual(t, "DefaultPlatformEgressIPFiltersLength", len(cfg.DefaultPlatformEgressIPFilters), 3)
+	assertEqual(t, "DefaultPlatformEgressIPFilters[0]", cfg.DefaultPlatformEgressIPFilters[0], "45.90.0.0/16")
+	assertEqual(t, "DefaultPlatformEgressIPFilters[1]", cfg.DefaultPlatformEgressIPFilters[1], "1.2.3.4")
+	assertEqual(t, "DefaultPlatformEgressIPFilters[2]", cfg.DefaultPlatformEgressIPFilters[2], "!203.0.113.0/24")
+}
+
+func TestLoadEnvConfig_DefaultPlatformEgressIPFilters_Invalid(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_DEFAULT_PLATFORM_EGRESS_IP_FILTERS"] = `["not-an-ip"]`
+	setEnvs(t, envs)
+
+	_, err := LoadEnvConfig()
+	if err == nil {
+		t.Fatal("expected error for invalid default egress_ip_filters")
+	}
+}

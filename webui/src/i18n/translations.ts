@@ -362,6 +362,12 @@ Note: Once enabled, requests without authentication information are rejected ins
   "节点名正则过滤规则（可选）": "Node name regex filters (optional)",
   "地区过滤规则": "Region filters",
   "地区过滤规则（可选）": "Region filters (optional)",
+  "出口 IP 过滤规则": "Egress IP filters",
+  "出口 IP 过滤规则（可选）": "Egress IP filters (optional)",
+  "每行一条 IP 或 CIDR，如：\n\n1.2.3.4\n45.90.0.0/16\n!203.0.113.0/24":
+    "One IP or CIDR per line, for example:\n\n1.2.3.4\n45.90.0.0/16\n!203.0.113.0/24",
+  "支持 IPv4/IPv6 与 CIDR 网段；以 ! 开头可排除（如 !203.0.113.0/24）。可与正选混用，最终结果为“先正选再排除”。":
+    "Supports IPv4/IPv6 and CIDR ranges; prefix with ! to exclude, such as !203.0.113.0/24. You can mix include and exclude rules; the final result is include first, then exclude.",
   "每行一条": "One per line",
   "每行一条正则表达式，例如：\n\n香港\n日本\n*专线\n!过期\n!失效\n\n表示：选择【香港】或【日本】的【专线】节点，并排除包含【过期】或【失效】的节点。":
     "One regular expression per line, for example:\n\nHong Kong\nJapan\n*Dedicated\n!Expired\n!Invalid\n\nMeaning: select [Dedicated] nodes containing [Hong Kong] or [Japan], and exclude nodes containing [Expired] or [Invalid].",

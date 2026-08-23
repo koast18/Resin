@@ -23,14 +23,53 @@ type PoolRangeFunc func(fn func(node.Hash, *node.NodeEntry) bool)
 // GetEntryFunc retrieves a node entry from the global pool by hash.
 type GetEntryFunc func(node.Hash) (*node.NodeEntry, bool)
 
+// EgressIPFilters holds compiled egress IP filter rules (single IPs and CIDRs).
+// Positive entries form an include set; entries prefixed with "!" form an
+// exclude set. An empty filter set disables IP filtering entirely.
+type EgressIPFilters struct {
+	Includes []netip.Prefix
+	Excludes []netip.Prefix
+}
+
+// Empty reports whether no IP filter rules are configured.
+func (f EgressIPFilters) Empty() bool {
+	return len(f.Includes) == 0 && len(f.Excludes) == 0
+}
+
+// Matches reports whether addr satisfies the filter set.
+// An empty filter set matches everything. With only exclude rules, any
+// address outside the excludes matches. With include rules, the address must
+// be contained in at least one include prefix, mirroring the region filter
+// semantics of "include first, then exclude".
+func (f EgressIPFilters) Matches(addr netip.Addr) bool {
+	if f.Empty() {
+		return true
+	}
+	for _, p := range f.Excludes {
+		if p.Contains(addr) {
+			return false
+		}
+	}
+	if len(f.Includes) > 0 {
+		for _, p := range f.Includes {
+			if p.Contains(addr) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
 // Platform represents a routing platform with its filtered routable view.
 type Platform struct {
 	ID   string
 	Name string
 
 	// Filter configuration.
-	RegexFilters  node.TagFilter
-	RegionFilters []string // lowercase ISO codes, supports negation "!xx"
+	RegexFilters    node.TagFilter
+	RegionFilters   []string        // lowercase ISO codes, supports negation "!xx"
+	EgressIPFilters EgressIPFilters // compiled single-IP/CIDR rules, empty disables filtering
 
 	// Other config fields.
 	StickyTTLNs                      int64
@@ -50,17 +89,18 @@ type Platform struct {
 // NewPlatform creates a Platform with an empty routable view.
 // The regex slice is treated as MUST rules for compatibility with internal callers.
 func NewPlatform(id, name string, regexFilters []*regexp.Regexp, regionFilters []string) *Platform {
-	return NewPlatformWithTagFilter(id, name, node.TagFilter{Must: regexFilters}, regionFilters)
+	return NewPlatformWithTagFilter(id, name, node.TagFilter{Must: regexFilters}, regionFilters, EgressIPFilters{})
 }
 
 // NewPlatformWithTagFilter creates a Platform with compiled line-oriented tag rules.
-func NewPlatformWithTagFilter(id, name string, regexFilters node.TagFilter, regionFilters []string) *Platform {
+func NewPlatformWithTagFilter(id, name string, regexFilters node.TagFilter, regionFilters []string, egressIPFilters EgressIPFilters) *Platform {
 	return &Platform{
-		ID:            id,
-		Name:          name,
-		RegexFilters:  regexFilters,
-		RegionFilters: regionFilters,
-		view:          NewRoutableView(),
+		ID:              id,
+		Name:            name,
+		RegexFilters:    regexFilters,
+		RegionFilters:   regionFilters,
+		EgressIPFilters: egressIPFilters,
+		view:            NewRoutableView(),
 	}
 }
 
@@ -149,7 +189,13 @@ func (p *Platform) evaluateNode(
 		}
 	}
 
-	// 5. Has at least one latency record.
+	// 5. Egress IP filter (when configured). The egress IP is guaranteed to be
+	// valid here (step 3), so no extra validity check is needed.
+	if !p.EgressIPFilters.Empty() && !p.EgressIPFilters.Matches(egressIP) {
+		return false
+	}
+
+	// 6. Has at least one latency record.
 	if !entry.HasLatency() {
 		return false
 	}

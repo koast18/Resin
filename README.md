@@ -172,6 +172,14 @@ Japan
 
 Only the first character is interpreted as a rule prefix; the rest remains a Go regular expression. Escape a literal leading `!` as `\!`.
 
+To further restrict nodes by their egress IP, configure the "Egress IP filters" field with one IP or CIDR per line (IPv4/IPv6 both supported); a leading `!` excludes that address/range. For example, allow only the `45.90.0.0/16` block and `1.2.3.4` as egress, while excluding `203.0.113.0/24`:
+
+```text
+45.90.0.0/16
+1.2.3.4
+!203.0.113.0/24
+```
+
 For forward proxy (HTTP / SOCKS5), include Platform in the auth info. Examples:
 
 ```bash

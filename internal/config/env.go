@@ -34,6 +34,7 @@ type EnvConfig struct {
 	DefaultPlatformStickyTTL                        time.Duration
 	DefaultPlatformRegexFilters                     []string
 	DefaultPlatformRegionFilters                    []string
+	DefaultPlatformEgressIPFilters                  []string
 	DefaultPlatformReverseProxyMissAction           string
 	DefaultPlatformReverseProxyEmptyAccountBehavior string
 	DefaultPlatformReverseProxyFixedAccountHeader   string
@@ -103,6 +104,7 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	cfg.DefaultPlatformStickyTTL = envDuration("RESIN_DEFAULT_PLATFORM_STICKY_TTL", 7*24*time.Hour, &errs)
 	cfg.DefaultPlatformRegexFilters = envStringSlice("RESIN_DEFAULT_PLATFORM_REGEX_FILTERS", []string{}, &errs)
 	cfg.DefaultPlatformRegionFilters = envStringSlice("RESIN_DEFAULT_PLATFORM_REGION_FILTERS", []string{}, &errs)
+	cfg.DefaultPlatformEgressIPFilters = envStringSlice("RESIN_DEFAULT_PLATFORM_EGRESS_IP_FILTERS", []string{}, &errs)
 	cfg.DefaultPlatformReverseProxyMissAction = envStr(
 		"RESIN_DEFAULT_PLATFORM_REVERSE_PROXY_MISS_ACTION",
 		string(platform.ReverseProxyMissActionTreatAsEmpty),
@@ -209,6 +211,9 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	}
 	if err := platform.ValidateRegionFilters(cfg.DefaultPlatformRegionFilters); err != nil {
 		errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_REGION_FILTERS: %v", err))
+	}
+	if _, err := platform.CompileEgressIPFilters(cfg.DefaultPlatformEgressIPFilters); err != nil {
+		errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_EGRESS_IP_FILTERS: %v", err))
 	}
 	normalizedMissAction := platform.NormalizeReverseProxyMissAction(cfg.DefaultPlatformReverseProxyMissAction)
 	if normalizedMissAction == "" {

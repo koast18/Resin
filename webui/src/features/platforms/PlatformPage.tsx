@@ -371,6 +371,21 @@ export function PlatformPage() {
                 </p>
               </div>
 
+              <div className="field-group">
+                <label className="field-label" htmlFor="create-egress-ip">
+                  {t("出口 IP 过滤规则（可选）")}
+                </label>
+                <Textarea
+                  id="create-egress-ip"
+                  rows={4}
+                  placeholder={t("每行一条 IP 或 CIDR，如：\n\n1.2.3.4\n45.90.0.0/16\n!203.0.113.0/24")}
+                  {...createForm.register("egress_ip_filters_text")}
+                />
+                <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                  {t("支持 IPv4/IPv6 与 CIDR 网段；以 ! 开头可排除（如 !203.0.113.0/24）。可与正选混用，最终结果为“先正选再排除”。")}
+                </p>
+              </div>
+
               <div className="detail-actions">
                 <Button type="submit" disabled={createMutation.isPending}>
                   {createMutation.isPending ? t("创建中...") : t("确认创建")}

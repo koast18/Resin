@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -244,5 +245,101 @@ func TestValidateRegionFilters_Invalid(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "region_filters[0]") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompileEgressIPFilters_Valid(t *testing.T) {
+	f, err := CompileEgressIPFilters([]string{
+		"1.2.3.4",         // bare IPv4
+		"45.90.0.0/16",    // IPv4 CIDR
+		"2001:db8::1",     // bare IPv6
+		"2001:db8::/32",   // IPv6 CIDR
+		"!203.0.113.0/24", // negation
+		" 9.9.9.9 ",       // surrounding spaces trimmed
+		"",                // blank line skipped
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(f.Includes) != 5 {
+		t.Fatalf("expected 5 include prefixes, got %d", len(f.Includes))
+	}
+	if len(f.Excludes) != 1 {
+		t.Fatalf("expected 1 exclude prefix, got %d", len(f.Excludes))
+	}
+	if !f.Includes[0].Contains(netip.MustParseAddr("1.2.3.4")) {
+		t.Fatal("bare IPv4 should compile to a /32 prefix")
+	}
+	// Host bits in a CIDR must be masked to a network prefix.
+	if got := f.Includes[1].String(); got != "45.90.0.0/16" {
+		t.Fatalf("expected masked prefix 45.90.0.0/16, got %s", got)
+	}
+	if got := f.Includes[3].String(); got != "2001:db8::/32" {
+		t.Fatalf("expected IPv6 prefix 2001:db8::/32, got %s", got)
+	}
+	if f.Includes[4].String() != "9.9.9.9/32" {
+		t.Fatalf("expected 9.9.9.9/32, got %s", f.Includes[4].String())
+	}
+}
+
+func TestCompileEgressIPFilters_Invalid(t *testing.T) {
+	cases := []struct {
+		name  string
+		rules []string
+	}{
+		{name: "garbage ip", rules: []string{"not-an-ip"}},
+		{name: "bad cidr", rules: []string{"45.90.0.0/99"}},
+		{name: "bad negation", rules: []string{"!whatever"}},
+		{name: "ipv4 trailing junk", rules: []string{"1.2.3.4/33"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileEgressIPFilters(tc.rules)
+			if err == nil {
+				t.Fatalf("expected error for %v", tc.rules)
+			}
+			if !strings.Contains(err.Error(), "egress_ip_filters[0]") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestBuildFromModel_EgressIPFilters(t *testing.T) {
+	mp := model.Platform{
+		ID: "p1", Name: "Default", StickyTTLNs: 1,
+		RegexFilters:           []string{},
+		RegionFilters:          []string{},
+		EgressIPFilters:        []string{"1.2.3.0/24", "!1.2.3.9"},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY",
+		AllocationPolicy:       "BALANCED",
+	}
+	plat, err := BuildFromModel(mp)
+	if err != nil {
+		t.Fatalf("BuildFromModel: %v", err)
+	}
+	if len(plat.EgressIPFilters.Includes) != 1 || len(plat.EgressIPFilters.Excludes) != 1 {
+		t.Fatalf("unexpected compiled filters: %+v", plat.EgressIPFilters)
+	}
+	if !plat.EgressIPFilters.Matches(netip.MustParseAddr("1.2.3.8")) {
+		t.Fatal("1.2.3.8 should match include 1.2.3.0/24")
+	}
+	if plat.EgressIPFilters.Matches(netip.MustParseAddr("1.2.3.9")) {
+		t.Fatal("1.2.3.9 should be excluded")
+	}
+}
+
+func TestBuildFromModel_InvalidEgressIPFilters(t *testing.T) {
+	mp := model.Platform{
+		ID: "p1", Name: "Default", StickyTTLNs: 1,
+		RegexFilters:           []string{},
+		RegionFilters:          []string{},
+		EgressIPFilters:        []string{"not-an-ip"},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY",
+		AllocationPolicy:       "BALANCED",
+	}
+	_, err := BuildFromModel(mp)
+	if err == nil || !strings.Contains(err.Error(), "egress_ip_filters") {
+		t.Fatalf("expected egress_ip_filters decode error, got %v", err)
 	}
 }

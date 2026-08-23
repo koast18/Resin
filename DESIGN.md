@@ -31,6 +31,7 @@
 * RegexFilters：节点标签过滤规则列表，语法见“节点标签过滤规则”。
 * RegexFiltersCompiled：按规则类型分组的编译结果。随着 RegexFilters 更新。
 * RegionFilters：一个地区列表。小写 ISO codes (e.g., "hk", "us")。节点的出口 IP 地区属于该列表才符合条件。空表示不做地区筛选。
+* EgressIPFilters：出口 IP 过滤规则列表，支持单个 IP 与 CIDR 网段（如 "1.2.3.4"、"45.90.0.0/16"、"2001:db8::/32"），支持以 "!" 前缀排除（如 "!203.0.113.0/24"）。编译为 `EgressIPFilters`（Includes/Excludes 两组 `netip.Prefix`）后参与过滤。空表示不做出口 IP 筛选。
 * 反向代理 Account 为空时的行为：随机路由 / 固定 Header 提取 / 按 Account Header Rule 提取。
 * 反向代理匹配 Account 失败后的行为：随机路由 或 拒绝请求。默认是随机路由。
 * 分配新节点的策略：偏好低延迟、偏好闲置 IP、均衡。默认是均衡。
@@ -280,8 +281,9 @@ No available proxy nodes
     2. 调用 `NodeEntry.MatchTagFilter(Platform.RegexFilters, subLookup)` 判断 Tag 是否匹配。
     3. 节点必须有出口 IP（无论 Platform 是否配置 `RegionFilters`）。
     4. 若 `RegionFilters` 非空，则节点出口 IP 地区必须符合 `RegionFilters`。
-    5. 有至少一条延迟信息。
-    6. Outbound 不为空
+    5. 若 `EgressIPFilters` 非空，则节点出口 IP 必须符合 `EgressIPFilters`（先正选再排除，语义与地区过滤一致）。
+    6. 有至少一条延迟信息。
+    7. Outbound 不为空
 * 过滤源：遍历全局节点池中的所有 `NodeEntry`。
 
 ##### Platform 节点视图动态更新
@@ -593,7 +595,7 @@ Resin 项目中所有的数据库都设计为单写，不会有多进程写入�
 ### SQLite 数据模型
 #### state.db
 * system_config(config_json, version, updated_at_ns)
-* platforms(id PK, name UNIQUE, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, updated_at_ns)
+* platforms(id PK, name UNIQUE, sticky_ttl_ns, regex_filters_json, region_filters_json, egress_ip_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, updated_at_ns)
 * subscriptions(id PK, name, url, update_interval_ns, enabled, ephemeral, created_at_ns, updated_at_ns)
 * account_header_rules(url_prefix PK, headers_json, updated_at_ns)
 
@@ -1189,6 +1191,7 @@ Body（partial patch 示例）：
   "sticky_ttl": "30m",
   "regex_filters": ["*^sub1/.*", ".*hk.*", "!过期"],
   "region_filters": ["hk","us"],
+  "egress_ip_filters": ["1.2.3.4", "45.90.0.0/16", "!203.0.113.0/24"],
   "routable_node_count": 123,
   "reverse_proxy_miss_action": "TREAT_AS_EMPTY|REJECT",
   "reverse_proxy_empty_account_behavior": "RANDOM|FIXED_HEADER|ACCOUNT_HEADER_RULE",
@@ -1218,6 +1221,7 @@ Body：
   "sticky_ttl": "168h",
   "regex_filters": ["^sub1/.*"],
   "region_filters": ["hk", "us"],
+  "egress_ip_filters": ["1.2.3.4", "45.90.0.0/16"],
   "reverse_proxy_miss_action": "TREAT_AS_EMPTY",
   "reverse_proxy_empty_account_behavior": "ACCOUNT_HEADER_RULE",
   "reverse_proxy_fixed_account_header": "Authorization\nX-Account-Id",
@@ -1229,7 +1233,7 @@ Body：
 字段要求：
 
 * 必填字段：`name`
-* 可选字段：`sticky_ttl`、`regex_filters`、`region_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
+* 可选字段：`sticky_ttl`、`regex_filters`、`region_filters`、`egress_ip_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
 * 不可传字段：`id`、`updated_at`、`routable_node_count`
 * 省略可选字段时，平台策略字段使用当前环境变量默认平台设置（`RESIN_DEFAULT_PLATFORM_*`）对应值；`passive_circuit_breaker_disabled` 默认 `false`
 
@@ -1239,6 +1243,7 @@ Body：
 * `sticky_ttl`：合法 Go duration。
 * `regex_filters`：节点标签过滤规则列表，语义与校验见“节点标签过滤规则”。
 * `region_filters`：每项为 ISO 3166-1 alpha-2 小写代码。
+* `egress_ip_filters`：每项为单个 IP（IPv4/IPv6）或 CIDR 网段；以 `!` 开头表示排除。
 * 枚举字段：`reverse_proxy_miss_action` 仅 `TREAT_AS_EMPTY|REJECT`；`reverse_proxy_empty_account_behavior` 仅 `RANDOM|FIXED_HEADER|ACCOUNT_HEADER_RULE`；`allocation_policy` 仅 `BALANCED|PREFER_LOW_LATENCY|PREFER_IDLE_IP`。
 * `passive_circuit_breaker_disabled`：布尔值。设为 `true` 后，此 Platform 的用户代理请求失败不会增加节点熔断计数；主动探测不受影响。成功请求仍会清除节点连续失败计数并可恢复熔断节点。
 * 组合约束：当 `reverse_proxy_empty_account_behavior=FIXED_HEADER` 时，`reverse_proxy_fixed_account_header` 必填；其值支持多行，每行一个合法 HTTP Header 字段名（会按顺序尝试提取）。
@@ -1269,7 +1274,7 @@ Body（partial patch 示例）：
 字段要求：
 
 * 必填字段：无
-* 可改字段：`name`、`sticky_ttl`、`regex_filters`、`region_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
+* 可改字段：`name`、`sticky_ttl`、`regex_filters`、`region_filters`、`egress_ip_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
 * 不可改字段：`id`、`updated_at`、`routable_node_count`
 
 关键校验：与“创建平台”一致。
@@ -1328,7 +1333,8 @@ Body（partial patch 示例）：
 {
   "platform_spec": {
     "regex_filters": ["^subA/.*"],
-    "region_filters": ["hk", "us"]
+    "region_filters": ["hk", "us"],
+    "egress_ip_filters": ["45.90.0.0/16"]
   }
 }
 ```
@@ -1336,7 +1342,7 @@ Body（partial patch 示例）：
 字段要求：
 
 * 必填字段：`platform_id` 与 `platform_spec` 二选一，且只能出现一个。
-* `platform_spec` 仅允许字段：`regex_filters`、`region_filters`。
+* `platform_spec` 仅允许字段：`regex_filters`、`region_filters`、`egress_ip_filters`。
 
 关键校验（最小集）：
 

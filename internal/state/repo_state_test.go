@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -448,7 +449,9 @@ func TestStateRepo_Platforms_CRUD(t *testing.T) {
 
 	p := model.Platform{
 		ID: "plat-1", Name: "Default", StickyTTLNs: 1000,
-		RegexFilters: []string{}, RegionFilters: []string{},
+		RegexFilters:           []string{},
+		RegionFilters:          []string{},
+		EgressIPFilters:        []string{"45.90.0.0/16", "!203.0.113.0/24"},
 		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
 		PassiveCircuitBreakerDisabled: true,
 		UpdatedAtNs:                   now,
@@ -473,6 +476,12 @@ func TestStateRepo_Platforms_CRUD(t *testing.T) {
 	}
 	if !got.PassiveCircuitBreakerDisabled {
 		t.Fatal("expected passive_circuit_breaker_disabled to round-trip true")
+	}
+	if !reflect.DeepEqual(got.EgressIPFilters, []string{"45.90.0.0/16", "!203.0.113.0/24"}) {
+		t.Fatalf("expected egress_ip_filters to round-trip, got %v", got.EgressIPFilters)
+	}
+	if got.EgressIPFilters == nil {
+		t.Fatal("egress_ip_filters must decode to an empty non-nil slice when unset")
 	}
 
 	// List.
@@ -913,4 +922,24 @@ func TestStateRepo_ConcurrentWrites(t *testing.T) {
 
 func itoa(i int) string {
 	return strconv.Itoa(i)
+}
+
+func TestStateRepo_Platform_ValidationRejectsInvalidEgressIPFilter(t *testing.T) {
+	repo := newTestStateRepo(t)
+	p := model.Platform{
+		ID: "plat-1", Name: "Default", StickyTTLNs: 1000,
+		RegexFilters:           []string{},
+		RegionFilters:          []string{},
+		EgressIPFilters:        []string{"not-an-ip"},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY",
+		AllocationPolicy:       "BALANCED",
+		UpdatedAtNs:            time.Now().UnixNano(),
+	}
+	err := repo.UpsertPlatform(p)
+	if err == nil {
+		t.Fatal("expected validation error for invalid egress_ip_filters")
+	}
+	if !strings.Contains(err.Error(), "egress_ip_filters") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }

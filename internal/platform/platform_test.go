@@ -350,3 +350,76 @@ func TestPlatform_FullRebuild_ClearsOld(t *testing.T) {
 		t.Fatal("h2 should have been removed by rebuild")
 	}
 }
+
+func TestEgressIPFilters_Matches(t *testing.T) {
+	parse := func(t *testing.T, rules ...string) EgressIPFilters {
+		t.Helper()
+		f, err := CompileEgressIPFilters(rules)
+		if err != nil {
+			t.Fatalf("CompileEgressIPFilters(%v): %v", rules, err)
+		}
+		return f
+	}
+
+	tests := []struct {
+		name  string
+		rules []string
+		addr  string
+		match bool
+	}{
+		{name: "empty matches everything", rules: nil, addr: "1.2.3.4", match: true},
+		{name: "exact IPv4", rules: []string{"1.2.3.4"}, addr: "1.2.3.4", match: true},
+		{name: "exact IPv4 miss", rules: []string{"1.2.3.4"}, addr: "5.6.7.8", match: false},
+		{name: "IPv4 CIDR", rules: []string{"45.90.0.0/16"}, addr: "45.90.12.34", match: true},
+		{name: "IPv4 CIDR miss", rules: []string{"45.90.0.0/16"}, addr: "45.91.0.1", match: false},
+		{name: "host bits masked", rules: []string{"45.90.1.2/16"}, addr: "45.90.77.88", match: true},
+		{name: "exact IPv6", rules: []string{"2001:db8::1"}, addr: "2001:db8::1", match: true},
+		{name: "IPv6 CIDR", rules: []string{"2001:db8::/32"}, addr: "2001:db8:1::9", match: true},
+		{name: "IPv6 CIDR miss", rules: []string{"2001:db8::/32"}, addr: "2001:db9::1", match: false},
+		{name: "exclude only", rules: []string{"!203.0.113.0/24"}, addr: "8.8.8.8", match: true},
+		{name: "exclude only blocks", rules: []string{"!203.0.113.0/24"}, addr: "203.0.113.9", match: false},
+		{name: "mixed include+exclude", rules: []string{"45.90.0.0/16", "!45.90.0.0/24"}, addr: "45.90.1.1", match: true},
+		{name: "mixed include+exclude blocked", rules: []string{"45.90.0.0/16", "!45.90.0.0/24"}, addr: "45.90.0.55", match: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := parse(t, tc.rules...)
+			addr := netip.MustParseAddr(tc.addr)
+			if got := f.Matches(addr); got != tc.match {
+				t.Fatalf("Matches(%s) = %v, want %v (filters=%v)", tc.addr, got, tc.match, tc.rules)
+			}
+		})
+	}
+}
+
+func TestPlatform_EvaluateNode_EgressIPFilter(t *testing.T) {
+	f, err := CompileEgressIPFilters([]string{"1.2.3.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewPlatformWithTagFilter("p1", "Test", node.TagFilter{}, nil, f)
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1") // egress IP 1.2.3.4
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 1 {
+		t.Fatal("node in allowed egress CIDR should be routable")
+	}
+
+	// Egress IP outside the filter's CIDR must be excluded.
+	p2, err := CompileEgressIPFilters([]string{"9.9.9.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plat2 := NewPlatformWithTagFilter("p2", "Test", node.TagFilter{}, nil, p2)
+	plat2.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if plat2.View().Size() != 0 {
+		t.Fatal("node outside allowed egress CIDR should not be routable")
+	}
+}
