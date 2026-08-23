@@ -1,6 +1,7 @@
 package service
 
 import (
+	"net/netip"
 	"strings"
 	"time"
 
@@ -63,9 +64,16 @@ func (s *ControlPlaneService) ListNodes(filters NodeFilters) ([]NodeSummary, err
 		})
 	}
 
+	// Pre-parse the egress IP filter once (an exact address or a CIDR prefix)
+	// so it is not re-parsed for every pool entry.
+	var egressPrefix *netip.Prefix
+	if filters.EgressIP != nil {
+		egressPrefix = parseEgressPrefix(*filters.EgressIP)
+	}
+
 	var result []NodeSummary
 	appendIfMatched := func(h node.Hash, entry *node.NodeEntry) {
-		if !s.nodeEntryMatchesFilters(entry, filters, subLookup) {
+		if !s.nodeEntryMatchesFilters(entry, filters, egressPrefix, subLookup) {
 			return
 		}
 		result = append(result, s.nodeEntryToSummary(h, entry))
@@ -118,9 +126,35 @@ func (s *ControlPlaneService) ListNodes(filters NodeFilters) ([]NodeSummary, err
 	return result, nil
 }
 
+// parseEgressPrefix parses an egress IP filter value, which may be either a
+// bare IP address ("203.0.113.10") or a CIDR prefix ("203.0.113.0/24",
+// "203.0.113.10/32"). It returns nil when the value is not a valid address or
+// prefix. A nil matcher matches nothing, mirroring the previous exact-string
+// behavior for arbitrary input.
+func parseEgressPrefix(v string) *netip.Prefix {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	if strings.Contains(v, "/") {
+		p, err := netip.ParsePrefix(v)
+		if err != nil {
+			return nil
+		}
+		return &p
+	}
+	addr, err := netip.ParseAddr(v)
+	if err != nil {
+		return nil
+	}
+	p := netip.PrefixFrom(addr, addr.BitLen())
+	return &p
+}
+
 func (s *ControlPlaneService) nodeEntryMatchesFilters(
 	entry *node.NodeEntry,
 	filters NodeFilters,
+	egressPrefix *netip.Prefix,
 	subLookup node.SubLookupFunc,
 ) bool {
 	// Enabled/disabled filter.
@@ -188,10 +222,10 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 			return false
 		}
 	}
-	// Egress IP filter.
+	// Egress IP / CIDR filter.
 	if filters.EgressIP != nil {
 		egressIP := entry.GetEgressIP()
-		if !egressIP.IsValid() || egressIP.String() != *filters.EgressIP {
+		if !egressIP.IsValid() || egressPrefix == nil || !egressPrefix.Contains(egressIP) {
 			return false
 		}
 	}

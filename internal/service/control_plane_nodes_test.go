@@ -485,6 +485,56 @@ func TestListNodes_EnabledFilter(t *testing.T) {
 	}
 }
 
+func TestListNodes_EgressIPFilterSupportsExactAndCIDR(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := newNodeListTestPool(subMgr)
+
+	sub := subscription.NewSubscription("sub-egress", "sub-egress", "https://example.com/egress", true, false)
+	subMgr.Register(sub)
+
+	// Each node gets a distinct egress IP; server value must differ per node
+	// so hashes are unique.
+	addRoutableNodeForSubscription(t, pool, sub,
+		[]byte(`{"type":"ss","server":"1.1.1.1","port":443}`), "44.255.13.86")
+	addRoutableNodeForSubscription(t, pool, sub,
+		[]byte(`{"type":"ss","server":"1.1.1.2","port":443}`), "44.255.13.200")
+	addRoutableNodeForSubscription(t, pool, sub,
+		[]byte(`{"type":"ss","server":"1.1.1.3","port":443}`), "44.255.14.5")
+	addRoutableNodeForSubscription(t, pool, sub,
+		[]byte(`{"type":"ss","server":"1.1.1.4","port":443}`), "203.0.113.7")
+
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+		GeoIP:  &geoip.Service{},
+	}
+
+	cases := []struct {
+		name   string
+		filter string
+		want   int
+	}{
+		{name: "exact ip", filter: "44.255.13.86", want: 1},
+		{name: "exact ip slash 32", filter: "44.255.13.86/32", want: 1},
+		{name: "cidr /24", filter: "44.255.13.0/24", want: 2},
+		{name: "cidr /24 with host bits", filter: "44.255.13.86/24", want: 2},
+		{name: "cidr /16", filter: "44.255.0.0/16", want: 3},
+		{name: "cidr /25 non-byte-aligned", filter: "44.255.13.128/25", want: 1},
+		{name: "no match", filter: "10.0.0.0/8", want: 0},
+		{name: "invalid value matches nothing", filter: "not-an-ip", want: 0},
+	}
+	for _, tc := range cases {
+		f := tc.filter
+		nodes, err := cp.ListNodes(NodeFilters{EgressIP: &f})
+		if err != nil {
+			t.Fatalf("%s: ListNodes: %v", tc.name, err)
+		}
+		if len(nodes) != tc.want {
+			t.Fatalf("%s: got %d nodes, want %d (%+v)", tc.name, len(nodes), tc.want, nodes)
+		}
+	}
+}
+
 func TestProbeEgress_ReturnsRegion(t *testing.T) {
 	subMgr := topology.NewSubscriptionManager()
 	pool := newNodeListTestPool(subMgr)

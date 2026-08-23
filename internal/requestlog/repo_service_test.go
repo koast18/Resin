@@ -682,3 +682,57 @@ func TestRepo_InsertBatchWithoutOpenReturnsNoActiveDB(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestRepo_ListEgressIPFilterSupportsExactAndCIDR(t *testing.T) {
+	repo := NewRepo(t.TempDir(), 1<<20, 5)
+	if err := repo.Open(); err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	base := time.Now().UnixNano()
+	rows := []proxy.RequestLogEntry{
+		{ID: "a", StartedAtNs: base + 100, ProxyType: proxy.ProxyTypeForward, EgressIP: "44.255.13.86"},
+		{ID: "b", StartedAtNs: base + 90, ProxyType: proxy.ProxyTypeForward, EgressIP: "44.255.13.200"},
+		{ID: "c", StartedAtNs: base + 80, ProxyType: proxy.ProxyTypeForward, EgressIP: "44.255.14.5"},
+		{ID: "d", StartedAtNs: base + 70, ProxyType: proxy.ProxyTypeForward, EgressIP: "203.0.113.7"},
+		{ID: "e", StartedAtNs: base + 60, ProxyType: proxy.ProxyTypeForward, EgressIP: ""},
+	}
+	if _, err := repo.InsertBatch(rows); err != nil {
+		t.Fatalf("repo.InsertBatch: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		filter string
+		want   []string
+	}{
+		{name: "exact ip", filter: "44.255.13.86", want: []string{"a"}},
+		{name: "exact ip slash 32", filter: "44.255.13.86/32", want: []string{"a"}},
+		{name: "cidr /24", filter: "44.255.13.0/24", want: []string{"a", "b"}},
+		{name: "cidr /24 non-zero host bits", filter: "44.255.13.86/24", want: []string{"a", "b"}},
+		{name: "cidr /16", filter: "44.255.0.0/16", want: []string{"a", "b", "c"}},
+		{name: "cidr /25 non-byte-aligned", filter: "44.255.13.128/25", want: []string{"b"}},
+		{name: "no match", filter: "10.0.0.0/8", want: nil},
+		{name: "invalid value matches nothing", filter: "not-an-ip", want: nil},
+	}
+	for _, tc := range cases {
+		got, _, _, err := repo.List(ListFilter{EgressIP: tc.filter, Limit: 10})
+		if err != nil {
+			t.Fatalf("%s: repo.List: %v", tc.name, err)
+		}
+		var ids []string
+		for _, r := range got {
+			ids = append(ids, r.ID)
+		}
+		if len(ids) != len(tc.want) {
+			t.Fatalf("%s: got ids %v, want %v", tc.name, ids, tc.want)
+		}
+		for i := range tc.want {
+			if ids[i] != tc.want[i] {
+				t.Fatalf("%s: got ids %v, want %v", tc.name, ids, tc.want)
+			}
+		}
+	}
+}
+

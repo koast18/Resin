@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -588,8 +589,11 @@ func (r *Repo) queryLogs(db *sql.DB, f ListFilter, limit int) ([]LogSummary, err
 		}
 	}
 	if f.EgressIP != "" {
-		where = append(where, "egress_ip = ?")
-		args = append(args, f.EgressIP)
+		cond, condArgs, constrained := egressIPFilter(f.EgressIP)
+		if constrained {
+			where = append(where, cond)
+			args = append(args, condArgs...)
+		}
 	}
 	if f.NetOK != nil {
 		where = append(where, "net_ok = ?")
@@ -697,6 +701,131 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// parseEgressPrefix parses an egress IP filter value, which may be either a
+// bare IP address ("203.0.113.10") or a CIDR prefix ("203.0.113.0/24",
+// "203.0.113.10/32"). It returns nil when the value is not a valid address
+// or prefix.
+func parseEgressPrefix(v string) *netip.Prefix {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	if strings.Contains(v, "/") {
+		p, err := netip.ParsePrefix(v)
+		if err != nil {
+			return nil
+		}
+		return &p
+	}
+	addr, err := netip.ParseAddr(v)
+	if err != nil {
+		return nil
+	}
+	p := netip.PrefixFrom(addr, addr.BitLen())
+	return &p
+}
+
+// egressIPFilter converts an egress IP filter value, which may be a bare IP
+// address ("203.0.113.10") or a CIDR prefix ("203.0.113.0/24",
+// "203.0.113.10/32"), into an index-friendly SQL condition over the
+// dotted-quad TEXT column egress_ip.
+//
+// Byte-aligned blocks (/8, /16, /24, /32) use a single indexed range scan
+// with a half-open [first, nextNetwork) bound; other prefixes are decomposed
+// into byte-aligned blocks joined with OR. Invalid values match nothing,
+// mirroring the previous exact-string behavior for arbitrary input.
+// constrained=false means the filter imposes no constraint (e.g. 0.0.0.0/0
+// matches everything).
+func egressIPFilter(value string) (cond string, args []any, constrained bool) {
+	p := parseEgressPrefix(value)
+	if p == nil {
+		return "1 = 0", nil, true
+	}
+	masked := p.Masked()
+	if masked.Bits() == 0 {
+		return "", nil, false
+	}
+	addr := masked.Addr()
+	if !addr.Is4() {
+		// IPv6 text (compressed hex form) is not numerically ordered, so only
+		// exact /128 matches are expressible via the text column.
+		if masked.Bits() == 128 {
+			return "egress_ip = ?", []any{addr.String()}, true
+		}
+		return "1 = 0", nil, true
+	}
+
+	first := ipv4ToUint64(addr)
+	last := first + uint64(1)<<(32-masked.Bits()) - 1
+
+	blocks := decomposeIPv4Range(first, last)
+	if len(blocks) == 1 {
+		b := blocks[0]
+		if b[1]-b[0] == 1 {
+			return "egress_ip = ?", []any{uint64ToIPv4(b[0]).String()}, true
+		}
+		return "egress_ip >= ? AND egress_ip < ?", []any{
+			uint64ToIPv4(b[0]).String(),
+			uint64ToIPv4(b[1]).String(),
+		}, true
+	}
+
+	var conds []string
+	for _, b := range blocks {
+		if b[1]-b[0] == 1 {
+			conds = append(conds, "egress_ip = ?")
+			args = append(args, uint64ToIPv4(b[0]).String())
+		} else {
+			conds = append(conds, "egress_ip >= ? AND egress_ip < ?")
+			args = append(args, uint64ToIPv4(b[0]).String(), uint64ToIPv4(b[1]).String())
+		}
+	}
+	return "(" + strings.Join(conds, " OR ") + ")", args, true
+}
+
+// decomposeIPv4Range splits the inclusive IPv4 range [first, last] into
+// byte-aligned blocks (/24, /16, /8, then single IPs) expressed as
+// half-open [start, endExclusive) intervals. The result is exact and bounded
+// by at most 256 blocks for any IPv4 range.
+//
+// Half-open upper bounds are required because dotted-quad TEXT is compared
+// lexicographically: "44.255.13.86" sorts after "44.255.13.255" ("8" > "2"),
+// so an inclusive "x.x.x.255" bound would silently drop hosts whose last
+// octet textually exceeds it. Using the next-aligned network address (e.g.
+// "44.255.14.0" for a /24) as the exclusive upper bound keeps the comparison
+// correct for all unpadded octets.
+func decomposeIPv4Range(first, last uint64) [][2]uint64 {
+	var blocks [][2]uint64
+	pos := first
+	for pos <= last {
+		size := 0
+		for _, bits := range []int{24, 16, 8} {
+			bs := uint64(1) << (32 - bits)
+			if pos%bs == 0 && pos+bs-1 <= last {
+				size = bits
+				break
+			}
+		}
+		// size clipped to {24,16,8}; fallback to a single IP (/32) otherwise.
+		blockSize := uint64(1)
+		if size != 0 {
+			blockSize = uint64(1) << (32 - size)
+		}
+		blocks = append(blocks, [2]uint64{pos, pos + blockSize})
+		pos += blockSize
+	}
+	return blocks
+}
+
+func ipv4ToUint64(addr netip.Addr) uint64 {
+	a := addr.As4()
+	return uint64(a[0])<<24 | uint64(a[1])<<16 | uint64(a[2])<<8 | uint64(a[3])
+}
+
+func uint64ToIPv4(v uint64) netip.Addr {
+	return netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
 }
 
 // sqliteFilesSize returns the total size of a SQLite database set:
