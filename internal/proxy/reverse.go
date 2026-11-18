@@ -80,7 +80,7 @@ func NewReverseProxy(cfg ReverseProxyConfig) *ReverseProxy {
 	}
 }
 
-func (p *ReverseProxy) outboundHTTPTransport(routed routedOutbound) *http.Transport {
+func (p *ReverseProxy) outboundHTTPTransport(routed routedOutbound) (*http.Transport, *ProxyError) {
 	p.transportPoolOnce.Do(func() {
 		if p.transportPool == nil {
 			p.transportPool = NewOutboundTransportPool(p.transportConfig)
@@ -251,6 +251,8 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	lifecycle := newRequestLifecycle(p.events, r, ProxyTypeReverse, false)
 	lifecycle.setTarget(parsed.Host, "")
 	upstreamTrace := newUpstreamRequestTrace(lifecycle.markFirstByteReceived)
+	upstreamTrace.onGetConn = lifecycle.clearRelayInfo
+	upstreamTrace.onGotConn = lifecycle.observeHTTPConn
 	var pendingEgressHeaderBytes int64
 	var egressBodyCounter *countingReadCloser
 	var ingressBodyCounter *countingReadCloser
@@ -315,9 +317,15 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		nodeHashRaw = route.NodeHash
 		lifecycle.setRouteResult(route)
 		if p.health != nil {
-			go p.health.RecordLatency(nodeHashRaw, domain, nil)
+			go recordLatencyForVersion(p.health, nodeHashRaw, route.NodeVersion, domain, nil)
 		}
-		transport = p.outboundHTTPTransport(routed)
+		transport, routeErr = p.outboundHTTPTransport(routed)
+		if routeErr != nil {
+			lifecycle.setProxyError(routeErr)
+			lifecycle.setHTTPStatus(routeErr.HTTPCode)
+			writeProxyError(w, routeErr)
+			return
+		}
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -333,7 +341,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// Add httptrace for TLS latency measurement on HTTPS.
 			if parsed.Protocol == "https" && hasRoute && p.health != nil {
-				reporter := newReverseLatencyReporter(p.health, nodeHashRaw, domain)
+				reporter := newReverseLatencyReporter(p.health, nodeHashRaw, domain, route.NodeVersion)
 				reqCtx = httptrace.WithClientTrace(reqCtx, reporter.clientTrace())
 			}
 			*req = *req.WithContext(reqCtx)
@@ -353,7 +361,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			lifecycle.setNetOK(false)
 			lifecycle.setHTTPStatus(proxyErr.HTTPCode)
 			if hasRoute {
-				recordPassiveResultAsync(p.health, route, false)
+				recordPassiveFailureAsync(p.health, route, err)
 			}
 			writeProxyError(rw, proxyErr)
 		},

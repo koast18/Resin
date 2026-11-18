@@ -69,7 +69,7 @@ func NewForwardProxy(cfg ForwardProxyConfig) *ForwardProxy {
 	}
 }
 
-func (p *ForwardProxy) outboundHTTPTransport(routed routedOutbound) *http.Transport {
+func (p *ForwardProxy) outboundHTTPTransport(routed routedOutbound) (*http.Transport, *ProxyError) {
 	p.transportPoolOnce.Do(func() {
 		if p.transportPool == nil {
 			p.transportPool = NewOutboundTransportPool(p.transportConfig)
@@ -243,12 +243,20 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		hasRoute = true
 		lifecycle.setRouteResult(route)
 		if p.health != nil {
-			go p.health.RecordLatency(route.NodeHash, netutil.ExtractDomain(r.Host), nil)
+			go recordLatencyForVersion(p.health, route.NodeHash, route.NodeVersion, netutil.ExtractDomain(r.Host), nil)
 		}
-		transport = p.outboundHTTPTransport(routed)
+		transport, routeErr = p.outboundHTTPTransport(routed)
+		if routeErr != nil {
+			lifecycle.setProxyError(routeErr)
+			lifecycle.setHTTPStatus(routeErr.HTTPCode)
+			writeProxyError(w, routeErr)
+			return
+		}
 	}
 	outReq := prepareForwardOutboundRequest(r)
 	upstreamTrace := newUpstreamRequestTrace(lifecycle.markFirstByteReceived)
+	upstreamTrace.onGetConn = lifecycle.clearRelayInfo
+	upstreamTrace.onGotConn = lifecycle.observeHTTPConn
 	outReq = outReq.WithContext(httptrace.WithClientTrace(outReq.Context(), upstreamTrace.clientTrace()))
 	pendingEgressHeaderBytes := headerWireLen(outReq.Header)
 	var egressBodyCounter *countingReadCloser
@@ -278,7 +286,7 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setUpstreamError("forward_roundtrip", err)
 		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
 		if hasRoute {
-			recordPassiveResultAsync(p.health, route, false)
+			recordPassiveFailureAsync(p.health, route, err)
 		}
 		writeProxyError(w, proxyErr)
 		return
@@ -339,6 +347,7 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	)
 	if prepare.route.PlatformID != "" {
 		lifecycle.setRouteResult(prepare.route)
+		lifecycle.setRelayInfo(prepare.relay)
 	}
 	if prepare.session == nil {
 		if prepare.proxyErr != nil {
@@ -361,7 +370,7 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_hijack", errors.New("response writer does not support hijacking"))
 		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
-		prepare.session.recordResult(false)
+		prepare.session.recordResult(false, nil)
 		writeProxyError(w, ErrUpstreamRequestFailed)
 		return
 	}
@@ -371,7 +380,7 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		prepare.session.upstreamConn.Close()
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_hijack", err)
-		prepare.session.recordResult(false)
+		prepare.session.recordResult(false, err)
 		return
 	}
 
@@ -404,7 +413,7 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setUpstreamError(relay.upstreamStage, relay.upstreamErr)
 	}
 	lifecycle.setNetOK(relay.netOK)
-	prepare.session.recordResult(relay.netOK)
+	prepare.session.recordResult(relay.netOK, relay.upstreamErr)
 }
 
 // shouldRecordForwardCopyFailure decides whether an HTTP response body copy

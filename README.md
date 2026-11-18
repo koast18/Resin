@@ -345,7 +345,7 @@ RESIN_PORT=2260
 <details>
 <summary><b>Option 2: Build from source</b></summary>
 <br>
-Prerequisites: Go 1.25+ and Node.js installed.
+Prerequisites: Go 1.26.10 and Node.js installed.
 
 ```bash
 # 1. Clone Resin source
@@ -385,6 +385,11 @@ RESIN_PORT=2260 \
   - **A**: If `RESIN_PROXY_TOKEN` is non-empty, the client must send SOCKS5 username/password authentication. If it is explicitly set to an empty string, `NO AUTH` is also allowed.
 - **Q: How to write reverse-proxy paths for WebSocket (ws/wss)?**
   - **A**: In the URL path, the protocol field must still be `http` or `https` (not `ws`/`wss`). Resin auto-detects and handles WebSocket upgrade.
+---
+
+## 🔗 Friends
+
+- [Linux.do](https://linux.do/)
 
 ---
 
